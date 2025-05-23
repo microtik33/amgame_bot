@@ -88,6 +88,26 @@ async def log_user_activity(user: types.User, action: str = "start"):
         logging.warning("Невозможно записать данные пользователя: не установлены SPREADSHEET_ID или USER_SHEET")
         return
     
+    # Запускаем запись в таблицу в отдельной задаче, чтобы не блокировать основной поток
+    asyncio.create_task(_log_user_to_sheets(user, action))
+
+async def _log_user_to_sheets(user: types.User, action: str):
+    """
+    Внутренняя функция для записи информации о пользователе в Google Sheets.
+    Выполняется в отдельной задаче.
+    """
+    try:
+        # Выполняем блокирующие операции в отдельном потоке через run_in_executor
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: _update_user_sheet(user, action))
+    except Exception as e:
+        logging.error(f"Ошибка при записи данных пользователя в фоновом режиме: {e}")
+
+def _update_user_sheet(user: types.User, action: str):
+    """
+    Синхронная функция для обновления данных пользователя в Google Sheets.
+    Запускается через run_in_executor.
+    """
     try:
         client = get_google_sheets_client()
         spreadsheet = client.open_by_key(SPREADSHEET_ID)
