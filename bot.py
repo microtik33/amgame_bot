@@ -98,25 +98,35 @@ async def log_user_activity(user: types.User, action: str = "start"):
         cell = user_sheet.find(user_id, in_column=1)
         
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Формируем полное имя пользователя
+        first_name = user.first_name or ""
+        last_name = user.last_name or ""
+        full_name = f"{first_name} {last_name}".strip()
+        
         username = f"@{user.username}" if user.username else "Нет username"
         user_link = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}"
         
         if cell:
-            # Если пользователь найден, обновляем счетчик запусков
+            # Если пользователь найден, обновляем счетчик запусков и имя
             row = cell.row
-            count_cell = user_sheet.cell(row, 4)
+            count_cell = user_sheet.cell(row, 5)  # Теперь счетчик в 5-й колонке
             count = int(count_cell.value) if count_cell.value and count_cell.value.isdigit() else 0
+            
+            # Обновляем имя пользователя на случай, если оно изменилось
+            user_sheet.update_cell(row, 2, full_name)
             
             if action == "start":
                 count += 1
-                user_sheet.update_cell(row, 4, count)
+                user_sheet.update_cell(row, 5, count)  # Обновляем счетчик в 5-й колонке
         else:
             # Если пользователь не найден, добавляем новую запись
             user_sheet.append_row([
-                user_id,
-                user_link,
-                current_time,
-                1 if action == "start" else 0
+                user_id,           # 1. User ID
+                full_name,         # 2. Полное имя
+                user_link,         # 3. Ссылка на пользователя
+                current_time,      # 4. Время первого запуска
+                1 if action == "start" else 0  # 5. Счетчик запусков
             ])
     except Exception as e:
         logging.error(f"Ошибка при записи данных пользователя: {e}")
