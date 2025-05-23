@@ -22,6 +22,7 @@ WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")  # URL хоста из переменн
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")  # ID Google таблицы
 SHEET_ID_1 = os.getenv("SHEET_ID_1")  # ID листа в таблице с вопросами
 USER_SHEET = os.getenv("USER_SHEET")  # ID листа для учёта пользователей
+ADMINS_SHEET = os.getenv("ADMINS_SHEET")  # ID листа со списком администраторов
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
 WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
 PING_URL = WEBHOOK_HOST
@@ -30,6 +31,7 @@ bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOW
 dp = Dispatcher()
 
 user_data = {}
+admin_ids = []  # Список ID администраторов
 
 # 🔹 Подключение к Google Sheets
 def get_questions_from_google_sheets() -> list[str]:
@@ -75,6 +77,46 @@ def get_google_sheets_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dict, scope)
     return gspread.authorize(creds)
+
+def load_admin_ids():
+    """
+    Загружает список ID администраторов из Google Sheets.
+    
+    Returns:
+        list[str]: Список ID администраторов
+    """
+    if not SPREADSHEET_ID or not ADMINS_SHEET:
+        logging.warning("Невозможно загрузить список администраторов: не установлены SPREADSHEET_ID или ADMINS_SHEET")
+        return []
+    
+    try:
+        client = get_google_sheets_client()
+        spreadsheet = client.open_by_key(SPREADSHEET_ID)
+        admins_sheet = spreadsheet.get_worksheet_by_id(int(ADMINS_SHEET))
+        
+        # Получаем все значения из первого столбца
+        admin_ids_list = admins_sheet.col_values(1)
+        
+        # Убираем заголовок, если он есть
+        if admin_ids_list and not admin_ids_list[0].isdigit():
+            admin_ids_list = admin_ids_list[1:]
+            
+        return admin_ids_list
+    except Exception as e:
+        logging.error(f"Ошибка при загрузке списка администраторов: {e}")
+        return []
+
+def is_admin(user_id: int) -> bool:
+    """
+    Проверяет, является ли пользователь администратором.
+    
+    Args:
+        user_id (int): ID пользователя
+    
+    Returns:
+        bool: True, если пользователь администратор, иначе False
+    """
+    return str(user_id) in admin_ids
 
 async def log_user_activity(user: types.User, action: str = "start"):
     """
@@ -153,6 +195,9 @@ def _update_user_sheet(user: types.User, action: str):
 
 # Загружаем вопросы из таблицы
 QUESTIONS_POOL = get_questions_from_google_sheets()
+
+# Загружаем список администраторов
+admin_ids = load_admin_ids()
 
 start_keyboard = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Начать игру", callback_data="start_game")]
@@ -256,6 +301,52 @@ async def show_donate(message: types.Message):
     """Выводит информацию о донатах."""
     await message.answer("🙏 <b>Благодарность</b>\n\nПоблагодарить автора игры можно:\n— Переводом на карту Т-Банк <b>2200700942783597</b>\n— Или по ссылке https://www.tinkoff.ru/rm/r_zPXLAjkOMT.psqSQuKezK/eHvLB70230. \n\nТакже вы можете дать обратную связь или просто послать сердечный намаскар @Jayashrii_jane", parse_mode="HTML")
 
+async def update_questions_cache():
+    """
+    Обновляет кеш вопросов из Google Sheets.
+    
+    Returns:
+        list[str]: Обновленный список вопросов
+    """
+    global QUESTIONS_POOL
+    try:
+        new_questions = get_questions_from_google_sheets()
+        QUESTIONS_POOL = new_questions
+        return new_questions
+    except Exception as e:
+        logging.error(f"Ошибка при обновлении кеша вопросов: {e}")
+        return QUESTIONS_POOL
+
+@dp.message(Command("update"))
+async def update_questions_command(message: types.Message):
+    """
+    Обработчик команды /update. Обновляет кеш вопросов из Google Sheets.
+    Доступно только администраторам.
+    """
+    user_id = message.from_user.id
+    
+    # Сначала обновляем список администраторов, чтобы использовать актуальные данные
+    global admin_ids
+    admin_ids = load_admin_ids()
+    
+    if not is_admin(user_id):
+        logging.warning(f"Попытка доступа к команде /update от неавторизованного пользователя: {user_id}")
+        # Не отвечаем, чтобы скрыть команду
+        return
+    
+    try:
+        # Отправляем сообщение о начале обновления
+        status_message = await message.answer("🔄 Обновление списка вопросов...")
+        
+        # Обновляем кеш вопросов
+        questions = await update_questions_cache()
+        
+        # Отправляем сообщение об успешном обновлении
+        await status_message.edit_text(f"✅ Список вопросов обновлен. Загружено {len(questions)} вопросов.")
+        
+    except Exception as e:
+        logging.error(f"Ошибка при выполнении команды /update: {e}")
+        await message.answer(f"❌ Ошибка при обновлении: {str(e)}")
 
 async def on_startup(bot: Bot):
     """Запуск вебхука при старте."""
@@ -286,7 +377,6 @@ async def main():
 
     asyncio.create_task(keep_awake())
     await asyncio.Event().wait()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
