@@ -33,6 +33,9 @@ dp = Dispatcher()
 user_data = {}
 admin_ids = []  # Список ID администраторов
 
+# Словарь для хранения состояний администраторов, ожидающих отправки сообщения для рассылки
+admin_sending_state = {}
+
 # 🔹 Подключение к Google Sheets
 def get_questions_from_google_sheets() -> list[str]:
     """
@@ -347,6 +350,102 @@ async def update_questions_command(message: types.Message):
     except Exception as e:
         logging.error(f"Ошибка при выполнении команды /update: {e}")
         await message.answer(f"❌ Ошибка при обновлении: {str(e)}")
+
+@dp.message(Command("send"))
+async def send_message_command(message: types.Message):
+    """
+    Обработчик команды /send. Позволяет администраторам отправлять рассылку всем пользователям.
+    Доступно только администраторам.
+    """
+    user_id = message.from_user.id
+    
+    # Обновляем список администраторов, чтобы использовать актуальные данные
+    global admin_ids
+    admin_ids = load_admin_ids()
+    
+    if not is_admin(user_id):
+        logging.warning(f"Попытка доступа к команде /send от неавторизованного пользователя: {user_id}")
+        # Не отвечаем, чтобы скрыть команду
+        return
+    
+    # Устанавливаем состояние ожидания текста рассылки
+    admin_sending_state[message.chat.id] = True
+    
+    await message.answer("✉️ Отправьте сообщение для рассылки. Вы можете включить фото, отправив его с текстом подписи.")
+
+@dp.message(lambda message: admin_sending_state.get(message.chat.id, False))
+async def process_broadcast_message(message: types.Message):
+    """
+    Обрабатывает сообщение для рассылки от администратора и отправляет его всем пользователям.
+    """
+    # Сбрасываем состояние ожидания
+    admin_sending_state[message.chat.id] = False
+    
+    try:
+        # Отправляем сообщение о начале рассылки
+        status_message = await message.answer("🔄 Начинаю рассылку сообщения...")
+        
+        # Получаем список ID пользователей из Google Sheets
+        client = get_google_sheets_client()
+        spreadsheet = client.open_by_key(SPREADSHEET_ID)
+        user_sheet = spreadsheet.get_worksheet_by_id(int(USER_SHEET))
+        
+        # Получаем первый столбец (ID пользователей), пропускаем заголовок если есть
+        user_ids = user_sheet.col_values(1)
+        if user_ids and not user_ids[0].isdigit():
+            user_ids = user_ids[1:]
+        
+        successful = 0
+        failed = 0
+        blocked = 0
+        
+        # Отправляем сообщение каждому пользователю
+        for user_id in user_ids:
+            try:
+                # Проверяем наличие фото в сообщении
+                if message.photo:
+                    # Получаем наибольшее по размеру фото
+                    photo = message.photo[-1]
+                    # Отправляем фото с подписью
+                    await bot.send_photo(
+                        chat_id=user_id,
+                        photo=photo.file_id,
+                        caption=message.caption or "",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                else:
+                    # Отправляем текстовое сообщение
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=message.text,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                successful += 1
+                # Добавляем небольшую задержку, чтобы избежать лимитов Telegram API
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                error_message = str(e).lower()
+                # Проверяем, заблокировал ли пользователь бота
+                if "blocked" in error_message or "bot was blocked" in error_message or "user is deactivated" in error_message or "chat not found" in error_message:
+                    blocked += 1
+                    logging.info(f"Пользователь {user_id} заблокировал бота или деактивирован")
+                else:
+                    failed += 1
+                    logging.error(f"Ошибка при отправке сообщения пользователю {user_id}: {e}")
+        
+        # Обновляем сообщение о статусе рассылки
+        await status_message.edit_text(
+            f"✅ Рассылка завершена\n"
+            f"📊 Статистика:\n"
+            f"- Успешно отправлено: {successful}\n"
+            f"- Заблокировали бота: {blocked}\n"
+            f"- Другие ошибки: {failed}\n"
+            f"- Всего пользователей: {len(user_ids)}"
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка при выполнении рассылки: {e}")
+        await message.answer(f"❌ Ошибка при выполнении рассылки: {str(e)}")
 
 async def on_startup(bot: Bot):
     """Запуск вебхука при старте."""
